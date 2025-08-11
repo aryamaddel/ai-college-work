@@ -4,6 +4,8 @@ from dataclasses import dataclass
 import tkinter as tk
 from tkinter import ttk
 from typing import List, Dict
+import platform
+import textwrap
 
 
 @dataclass(frozen=True)
@@ -322,54 +324,182 @@ def recommend(ids: List[str]) -> Spec:
 
 
 class App(tk.Tk):
+    """Minimal, cleaner UI for workload selection & spec output."""
+
     def __init__(self):
         super().__init__()
         self.title("Hardware Recommender")
-        # Dynamic height based on number of workloads (rough heuristic)
-        base_h = 300 + 20 * len(RULES)
-        self.geometry(f"600x{min(base_h, 760)}")
+        self.minsize(640, 520)
+        self.geometry("720x560")
+        if platform.system() == "Windows":
+            try:
+                self.iconbitmap(default="")  # no external icon; keep minimal
+            except Exception:
+                pass
         self.vars: Dict[str, tk.BooleanVar] = {}
+        self._configure_style()
         self._build()
+        self.bind("<Return>", lambda _e: self.on_recommend())
+        self.bind("<Control-l>", lambda _e: self.on_clear())
+        self.bind("<Control-r>", lambda _e: self.on_recommend())
+
+    # ---------------- UI construction -----------------
+    def _configure_style(self):
+        style = ttk.Style(self)
+        # Use a platform neutral theme with modern-ish look
+        preferred = "clam"
+        if preferred in style.theme_names():
+            style.theme_use(preferred)
+        style.configure("TLabel", padding=(0, 2))
+        style.configure("Heading.TLabel", font=("Segoe UI", 12, "bold"))
+        style.configure("Status.TLabel", foreground="#555")
+        style.configure("Outlined.TFrame", borderwidth=1, relief="solid")
+        style.map(
+            "TCheckbutton",
+            background=[("active", "#eef"), ("selected", "#eef")],
+        )
 
     def _build(self):
-        ttk.Label(self, text="Select workload categories:").pack(
-            anchor="w", padx=10, pady=(8, 4)
+        container = ttk.Frame(self)
+        container.pack(fill="both", expand=True, padx=12, pady=10)
+
+        # Header
+        ttk.Label(container, text="Hardware Recommender", style="Heading.TLabel").pack(
+            anchor="w"
         )
-        box = ttk.Frame(self)
-        box.pack(fill="x", padx=10)
-        left, right = ttk.Frame(box), ttk.Frame(box)
-        left.pack(side="left", fill="x", expand=True)
-        right.pack(side="left", fill="x", expand=True)
-        half = (len(RULES) + 1) // 2
-        for i, (wid, label, _spec, _meta) in enumerate(RULES):
+        sub = (
+            "Select the workloads you care about. Recommendations update automatically."
+        )
+        ttk.Label(container, text=sub, wraplength=640).pack(anchor="w", pady=(0, 6))
+
+        body = ttk.Frame(container)
+        body.pack(fill="both", expand=True)
+
+        # Left: workload selection (scrollable)
+        left = ttk.Frame(body)
+        left.pack(side="left", fill="y", padx=(0, 12))
+
+        ttk.Label(left, text="Workloads:").pack(anchor="w")
+        scroll_frame = self._scrollable_checkbox_frame(left, height=270)
+        self._populate_workloads(scroll_frame.inner)
+
+        btn_bar = ttk.Frame(left)
+        btn_bar.pack(fill="x", pady=(6, 0))
+        ttk.Button(btn_bar, text="Recommend", command=self.on_recommend).pack(
+            side="left"
+        )
+        ttk.Button(btn_bar, text="Clear", command=self.on_clear).pack(
+            side="left", padx=4
+        )
+        ttk.Button(btn_bar, text="Copy", command=self.on_copy).pack(side="left")
+
+        self.status_var = tk.StringVar(value="0 selected")
+        ttk.Label(left, textvariable=self.status_var, style="Status.TLabel").pack(
+            anchor="w", pady=(4, 0)
+        )
+
+        # Right: output panel
+        right = ttk.Frame(body)
+        right.pack(side="left", fill="both", expand=True)
+        ttk.Label(right, text="Suggested Spec:").pack(anchor="w")
+        self.out = tk.Text(
+            right,
+            height=14,
+            wrap="word",
+            state="disabled",
+            background="#f5f6f7",
+            relief="flat",
+            padx=8,
+            pady=6,
+        )
+        self.out.pack(fill="both", expand=True, pady=(2, 0))
+
+        self._update_output_live()  # initial default
+
+    # ---------------- workload list helpers -----------------
+    def _scrollable_checkbox_frame(self, parent, height=260):
+        outer = ttk.Frame(parent)
+        outer.pack(fill="y", expand=False)
+        canvas = tk.Canvas(outer, borderwidth=0, height=height, highlightthickness=0)
+        vsb = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        inner = ttk.Frame(canvas)
+        canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        def _on_inner_config(_e):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        inner.bind("<Configure>", _on_inner_config)
+        # Basic mousewheel support
+        def _wheel(evt):
+            delta = -1 * (evt.delta // 120 if evt.delta else (1 if evt.num == 5 else -1))
+            canvas.yview_scroll(delta, "units")
+
+        canvas.bind_all("<MouseWheel>", _wheel)
+        # Simple named object with attributes for clarity
+        class _ScrollFrame:
+            def __init__(self, outer, inner):
+                self.outer = outer
+                self.inner = inner
+
+        return _ScrollFrame(outer, inner)
+
+    def _populate_workloads(self, parent):
+        # Two-column grid inside scroll area (responsive) keeping minimalistic look
+        cols = 1 if len(RULES) <= 10 else 2
+        for idx, (wid, label, _spec, _meta) in enumerate(RULES):
             v = tk.BooleanVar(value=False)
             self.vars[wid] = v
-            ttk.Checkbutton((left if i < half else right), text=label, variable=v).pack(
-                anchor="w", pady=1
-            )
-        bf = ttk.Frame(self)
-        bf.pack(fill="x", padx=10, pady=6)
-        ttk.Button(bf, text="Recommend", command=self.on_recommend).pack(side="left")
-        ttk.Button(bf, text="Clear", command=self.on_clear).pack(side="left", padx=6)
-        ttk.Label(self, text="Suggested Specs:").pack(anchor="w", padx=10)
-        self.out = tk.Text(
-            self, height=12, wrap="word", state="disabled", background="#f7f7f7"
-        )
-        self.out.pack(fill="both", expand=True, padx=10, pady=(4, 10))
+            cb = ttk.Checkbutton(parent, text=label, variable=v, command=self._update_output_live)
+            r = idx // cols
+            c = idx % cols
+            cb.grid(row=r, column=c, sticky="w", padx=(0, 12), pady=1)
+        for c in range(cols):
+            parent.grid_columnconfigure(c, weight=1)
 
+    # ---------------- status & output -----------------
+    def _update_status(self):
+        count = sum(1 for v in self.vars.values() if v.get())
+        self.status_var.set(f"{count} selected")
+
+    def _format_spec(self, ids, spec: Spec) -> str:
+        labels = [l for wid, l, _s, _m in RULES if wid in ids]
+        wl = ", ".join(labels) if labels else "(none)"
+        notes = textwrap.fill(spec.notes, width=76) if spec.notes else ""
+        return (
+            f"Workloads: {wl}\n"
+            f"CPU      : {spec.cpu}\n"
+            f"RAM      : {spec.ram_gb} GB\n"
+            f"Storage  : {spec.storage}\n"
+            f"GPU      : {spec.gpu}\n"
+            f"Notes    : {notes}"
+        )
+
+    def _update_output_live(self):
+        self._update_status()
+        self.on_recommend(auto=True)
+
+    # ---------------- actions -----------------
     def on_clear(self):
         for v in self.vars.values():
             v.set(False)
-        self._out("")
+        self._update_output_live()
 
-    def on_recommend(self):
+    def on_recommend(self, auto: bool = False):
         ids = [wid for wid, v in self.vars.items() if v.get()]
         spec = recommend(ids)
-        labels = [l for wid, l, _s, _m in RULES if wid in ids]
-        wl = ", ".join(labels) if labels else "(none)"
-        self._out(
-            f"Workloads: {wl}\n\nCPU: {spec.cpu}\nRAM: {spec.ram_gb} GB\nStorage: {spec.storage}\nGPU: {spec.gpu}\nNotes: {spec.notes}"
-        )
+        text = self._format_spec(ids, spec)
+        prefix = "" if auto else ""  # reserved for future labels
+        self._out(prefix + text)
+
+    def on_copy(self):
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(self.out.get("1.0", tk.END).strip())
+        except Exception:
+            pass
 
     def _out(self, text: str):
         self.out.configure(state="normal")
